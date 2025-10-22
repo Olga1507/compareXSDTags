@@ -29,9 +29,10 @@ public class ValidationService {
     public ValidationResult validate(MultipartFile xsdFile, MultipartFile sqlFile) {
         try {
             Map<String, Integer> xsdPaths = parseXsd(xsdFile);
-            Map<String, Integer> sqlPaths = extractSqlPaths(sqlFile, xsdPaths.keySet());
+            Map<String, Integer> sqlPaths = extractSqlPaths(sqlFile);
 
             List<String> differences = new ArrayList<>();
+            List<String> absences = new ArrayList<>();
             for (String path : xsdPaths.keySet()) {
                 if (sqlPaths.containsKey(path)) {
                     int xsdReq = xsdPaths.get(path);
@@ -43,7 +44,12 @@ public class ValidationService {
                         );
                     }
                 }
+                else {
+                    absences.add("Отсутствует в sql-файле xsdPath '" + path);
+                }
             }
+
+            differences.addAll(absences);
 
             boolean valid = differences.isEmpty();
             return new ValidationResult(valid, differences);
@@ -251,20 +257,19 @@ public class ValidationService {
         }
     }
 
-    private Map<String, Integer> extractSqlPaths(MultipartFile file, Set<String> expectedPaths) {
+    private Map<String, Integer> extractSqlPaths(MultipartFile file) {
         String content = readFileWithEncoding(file);
         if (content == null) return Map.of();
 
-        Pattern pattern = Pattern.compile("M_INS_MSG_TMPL\\([^,]+,[^,]+,\\s*'(/[^']+)'.*?,\\s*(\\d)\\s*,\\s*0\\s*\\)", Pattern.CASE_INSENSITIVE);
+        //(/Document/[^']+)'[^,]*,\D*(\d+)[^,]*,\D*(\d+)
+        Pattern pattern = Pattern.compile("(/Document/[^']+)'[^,]*,\\D*(\\d+)", Pattern.CASE_INSENSITIVE);
         Matcher matcher = pattern.matcher(content);
 
         Map<String, Integer> paths = new HashMap<>();
         while (matcher.find()) {
             String path = matcher.group(1);
-            if (path.startsWith("/") && expectedPaths.contains(path)) {
-                int required = Integer.parseInt(matcher.group(2));
-                paths.put(path, required);
-            }
+            int required = Integer.parseInt(matcher.group(2));
+            paths.put(path, required);
         }
         return paths;
     }
