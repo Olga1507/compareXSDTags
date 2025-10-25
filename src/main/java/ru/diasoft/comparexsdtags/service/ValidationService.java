@@ -182,39 +182,53 @@ public class ValidationService {
 
     private void processComplexType(Element ct, String currentPath, Map<String, Integer> paths,
                                     XPath xpath, boolean parentRequired) throws XPathExpressionException {
+
         // Обработка sequence
         NodeList sequenceList = (NodeList) xpath.evaluate("*[local-name()='sequence']", ct, XPathConstants.NODESET);
         for (int s = 0; s < sequenceList.getLength(); s++) {
             Element seq = (Element) sequenceList.item(s);
             NodeList elements = (NodeList) xpath.evaluate("*[local-name()='element']", seq, XPathConstants.NODESET);
+
             for (int j = 0; j < elements.getLength(); j++) {
                 Element elem = (Element) elements.item(j);
                 String name = elem.getAttribute("name");
                 if (name.isEmpty()) continue;
 
+                String typeName = elem.getAttribute("type");
+                boolean isComplexTypeRef = !typeName.isEmpty() &&
+                        hasComplexTypeDefinition(typeName, elem.getOwnerDocument(), xpath);
+
+                // Если тип — complexType, НЕ добавляем сам элемент в paths
+                // Только рекурсивно обрабатываем его содержимое
+                if (isComplexTypeRef) {
+                    boolean isRequiredHere = getMinOccurs(elem) == 1;
+                    boolean effectiveRequired = parentRequired && isRequiredHere;
+                    String newPath = currentPath + "/" + name;
+
+                    // Рекурсия: раскрываем содержимое complexType
+                    Node nestedType = (Node) xpath.evaluate(
+                            "/*[local-name()='schema']/*[local-name()='complexType'][@name='" + extractLocalName(typeName) + "']",
+                            elem.getOwnerDocument(), XPathConstants.NODE);
+                    if (nestedType != null) {
+                        processComplexType((Element) nestedType, newPath, paths, xpath, effectiveRequired);
+                    }
+
+                    // ⛔ Не добавляем сам путь /.../GrpHdr в paths!
+                    continue;
+                }
+
+                // Если это простой тип (примитив), добавляем в paths
                 String newPath = currentPath + "/" + name;
                 boolean isRequiredHere = getMinOccurs(elem) == 1;
                 boolean effectiveRequired = parentRequired && isRequiredHere;
                 paths.put(newPath, effectiveRequired ? 1 : 2);
 
-                // Рекурсия: вложенный тип по имени
-                String typeName = elem.getAttribute("type");
-                if (!typeName.isEmpty() && typeName.contains(":")) {
-                    typeName = typeName.substring(typeName.indexOf(":") + 1);
-                }
-                if (!typeName.isEmpty()) {
-                    Node nestedType = (Node) xpath.evaluate("// *[local-name()='complexType'][@name='" + typeName + "']", elem.getOwnerDocument(), XPathConstants.NODE);
-                    if (nestedType != null) {
-                        processComplexType((Element) nestedType, newPath, paths, xpath, effectiveRequired);
-                    }
-                }
-
-                // Вложенный анонимный тип
-                NodeList anonList = elem.getElementsByTagName("*");
-                for (int k = 0; k < anonList.getLength(); k++) {
-                    Node anon = anonList.item(k);
-                    if ("complexType".equals(anon.getLocalName())) {
-                        processComplexType((Element) anon, newPath, paths, xpath, effectiveRequired);
+                // Обработка вложенного анонимного типа (анонимный complexType)
+                NodeList anonChildren = elem.getChildNodes();
+                for (int k = 0; k < anonChildren.getLength(); k++) {
+                    Node child = anonChildren.item(k);
+                    if ("complexType".equals(child.getLocalName())) {
+                        processComplexType((Element) child, newPath, paths, xpath, effectiveRequired);
                         break;
                     }
                 }
@@ -226,34 +240,61 @@ public class ValidationService {
         for (int c = 0; c < choiceList.getLength(); c++) {
             Element choice = (Element) choiceList.item(c);
             NodeList elements = (NodeList) xpath.evaluate("*[local-name()='element']", choice, XPathConstants.NODESET);
+
             for (int j = 0; j < elements.getLength(); j++) {
                 Element elem = (Element) elements.item(j);
                 String name = elem.getAttribute("name");
                 if (name.isEmpty()) continue;
 
-                String newPath = currentPath + "/" + name;
-                paths.put(newPath, 2); // choice = необязательный
-
                 String typeName = elem.getAttribute("type");
-                if (!typeName.isEmpty() && typeName.contains(":")) {
-                    typeName = typeName.substring(typeName.indexOf(":") + 1);
-                }
-                if (!typeName.isEmpty()) {
-                    Node nestedType = (Node) xpath.evaluate("// *[local-name()='complexType'][@name='" + typeName + "']", elem.getOwnerDocument(), XPathConstants.NODE);
+                boolean isComplexTypeRef = !typeName.isEmpty() &&
+                        hasComplexTypeDefinition(typeName, elem.getOwnerDocument(), xpath);
+
+                String newPath = currentPath + "/" + name;
+
+                if (isComplexTypeRef) {
+                    // Раскрываем вложенный тип, но не добавляем сам choice-элемент
+                    Node nestedType = (Node) xpath.evaluate(
+                            "/*[local-name()='schema']/*[local-name()='complexType'][@name='" + extractLocalName(typeName) + "']",
+                            elem.getOwnerDocument(), XPathConstants.NODE);
                     if (nestedType != null) {
                         processComplexType((Element) nestedType, newPath, paths, xpath, false);
                     }
+                    continue;
                 }
 
-                NodeList anonList = elem.getElementsByTagName("*");
-                for (int k = 0; k < anonList.getLength(); k++) {
-                    Node anon = anonList.item(k);
-                    if ("complexType".equals(anon.getLocalName())) {
-                        processComplexType((Element) anon, newPath, paths, xpath, false);
+                // Простые поля внутри choice — всегда необязательные
+                paths.put(newPath, 2);
+
+                // Анонимный тип
+                NodeList anonChildren = elem.getChildNodes();
+                for (int k = 0; k < anonChildren.getLength(); k++) {
+                    Node child = anonChildren.item(k);
+                    if ("complexType".equals(child.getLocalName())) {
+                        processComplexType((Element) child, newPath, paths, xpath, false);
                         break;
                     }
                 }
             }
+        }
+    }
+
+    private String extractLocalName(String typeName) {
+        if (typeName.contains(":")) {
+            return typeName.substring(typeName.indexOf(":") + 1);
+        }
+        return typeName;
+    }
+
+    private boolean hasComplexTypeDefinition(String typeName, Document doc, XPath xpath) {
+        try {
+            String localTypeName = extractLocalName(typeName);
+            Node node = (Node) xpath.evaluate(
+                    "/*[local-name()='schema']/*[local-name()='complexType'][@name='" + localTypeName + "']",
+                    doc, XPathConstants.NODE);
+            return node != null;
+        } catch (Exception e) {
+            return false;
         }
     }
 
