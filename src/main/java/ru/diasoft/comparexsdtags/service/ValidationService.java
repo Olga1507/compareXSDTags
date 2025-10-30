@@ -45,7 +45,7 @@ public class ValidationService {
                     }
                 }
                 else {
-                    absences.add("Отсутствует в sql-файле xsdPath '" + path);
+                    absences.add("Отсутствует в sql-файле xsdPath '" + path + "'");
                 }
             }
 
